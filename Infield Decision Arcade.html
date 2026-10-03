@@ -1,0 +1,147 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Infield Decision Arcade</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0b0b1e;--fg:#fff;--ac:#ffd400;--ok:#3ddc5a;--bad:#ff4d4d;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0b1e;--fg:#fff}}
+:root[data-theme="dark"]{--bg:#0b0b1e;--fg:#fff}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:'Press Start 2P',monospace;font-size:10px;display:flex;justify-content:center}
+#w{width:100%;max-width:800px;padding:6px;position:relative}
+#hud{display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap;color:var(--ac);padding:4px 2px}
+#sit{min-height:26px;padding:4px 2px;line-height:1.6}
+canvas{width:100%;display:block;border:3px solid var(--ac);image-rendering:pixelated;touch-action:manipulation;cursor:pointer}
+#fb{margin-top:6px;padding:8px;border:3px solid var(--ac);line-height:1.7;font-size:9px}
+button{font-family:inherit;font-size:11px;background:var(--ac);color:#000;border:0;padding:10px 14px;margin-top:8px;cursor:pointer}
+#ov{position:absolute;inset:0;background:rgba(5,5,20,.93);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;line-height:2;padding:20px;z-index:5}
+#ov h1{color:var(--ac);font-size:20px;margin:0 0 10px}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+</style></head><body><div id="w">
+<div id="hud"><span id="hr"></span><span id="ha"></span><span id="hs"></span></div>
+<div id="sit">&nbsp;</div>
+<canvas id="c" width="800" height="600"></canvas>
+<div id="fb" hidden></div>
+<div id="ov"><h1>INFIELD DECISION</h1>
+<p>Ball hit! Tap the fielder who should get the out.<br>Think: force or tag? Did the ball change the play?<br>10 at-bats per round. Get 7 right to advance.<br>Later rounds: tougher plays, less time.</p>
+<button id="go">START</button></div>
+</div>
+<script>
+const cv=document.getElementById('c'),g=cv.getContext('2d');g.imageSmoothingEnabled=false;
+const $=i=>document.getElementById(i);
+const B={H:[400,520],1:[590,400],2:[400,290],3:[210,400]};
+const F={C:[400,562],P:[400,405],'1B':[610,415],'2B':[490,335],SS:[310,335],'3B':[190,415]};
+const TG={1:[[590,400],[610,415]],2:[[400,290],[490,335],[310,335]],3:[[210,400],[190,415]],H:[[400,525],[400,562]]};
+const NM={1:'1B',2:'2B',3:'3B',H:'HOME'};
+const ALL=['1B','2B','SS','3B'],M=['SS','2B'];
+// [runners, hit positions, outs, best answer(s) '/'=equal credit, alt answer if ball/runner changes it, level]
+const S=[
+['',ALL,[0,1,2],'1',null,1],
+['1',M,[0,1],'2','1',1],['1',['3B'],[0,1],'2','1',1],['1',['1B'],[0,1],'2','1',1],['1',ALL,[2],'2/1',null,1],
+['2',['SS','3B'],[0,1],'1','3',1],['2',['2B','1B'],[0,1],'1',null,1],['2',ALL,[2],'1',null,1],
+['3',['3B','SS'],[0,1],'1','H',1],['3',['2B','1B'],[0,1],'1',null,1],['3',ALL,[2],'1',null,1],
+['12',['3B'],[0,1],'3','1',2],['12',['SS'],[0,1],'3','2',2],['12',['2B'],[0,1],'2','1',2],['12',['1B'],[0,1],'2','1',2],['12',ALL,[2],'3/2/1',null,2],
+['23',['3B','SS'],[0,1],'1','H/3',2],['23',['2B','1B'],[0,1],'1',null,2],['23',ALL,[2],'1',null,2],
+['13',M,[0,1],'2','1',3],['13',['3B'],[0,1],'1','2/H',3],['13',['1B'],[0,1],'2','1',3],['13',ALL,[2],'2/1',null,3],
+['123',['3B'],[0,1],'H','1',3],['123',['SS'],[0,1],'H','3/2',3],['123',['2B'],[0,1],'H','2/1',3],['123',['1B'],[0,1],'H','1',3],
+['123',['3B'],[2],'1/3',null,3],['123',M,[2],'2/3/1',null,3],['123',['1B'],[2],'1',null,3]];
+const R=a=>a[Math.floor(Math.random()*a.length)];
+let round=1,ab=0,score=0,right=0,st='idle',t=0,tl=0,lim=7.5,cur=null,bp=[400,405],lock=false;
+const level=()=>Math.min(round,3);
+function newAB(){
+  const pool=S.filter(s=>s[5]<=level()),s=R(pool),tough=round>=2&&s[4]&&Math.random()<.5;
+  const forced=s[0]===''?['1']:['1'].concat(s[0].includes('1')?['2']:[]).concat(s[0]==='12'||s[0]==='123'?['3']:[]).concat(s[0]==='123'?['H']:[]);
+  cur={r:s[0],hit:R(s[1]),outs:R(s[2]),ans:tough?s[4]:s[3],tough,forced,balls:Math.floor(Math.random()*4),strikes:Math.floor(Math.random()*3)};
+  const w=cur.ans.includes('H')||(cur.ans==='3/2'&&0);
+  cur.runnerBreak=tough&&(/H|^3$/.test(cur.ans)&&!s[3].includes(cur.ans[0]))&&s[0]!=='123';
+  cur.desc=cur.runnerBreak?'A runner breaks hard!':tough?'Slow chopper, fielder off balance!':R(['Routine grounder','Hard-hit grounder','Sharp grounder']);
+  ab++;st='call';t=0;$('fb').hidden=true;lock=true;
+  $('sit').innerHTML=`COACH CALLS: ${rl(cur.r)} &bull; ${cur.outs} OUT${cur.outs==1?'':'S'}`;upd();
+}
+function upd(){$('hr').textContent='ROUND '+round;$('ha').textContent='AT-BAT '+Math.min(ab,10)+'/10';$('hs').textContent='SCORE '+score;}
+const rl=r=>r===''?'BASES EMPTY':r==='123'?'BASES LOADED':'R'+r.split('').join('-R');
+function resolve(a){
+  if(st!=='decide')return;
+  const ok=a&&cur.ans.split('/').includes(a);let pts=0;
+  if(ok){pts=100+Math.round(50*tl/lim);score+=pts;right++}
+  cur.pick=a;cur.ok=ok;st='throw';t=0;cur.from=F[cur.hit].slice();
+  const best=cur.ans.split('/').map(x=>NM[x]).join(' or '),b0=cur.ans[0];
+  const play=cur.forced.includes(b0)?'FORCE play':'TAG play (no force)';
+  $('fb').innerHTML=`<b class="${ok?'ok':'bad'}">${a===null?'TIME!':ok?'GOOD DECISION! +'+pts:'WRONG PLAY!'}</b><br>Best out: ${best} (${play}).<br>Forces were at: ${cur.forced.map(x=>NM[x]).join(', ')}.${cur.tough?'<br>The ball/runner changed the default play.':''}<br><button id="nx">${ab>=10?'FINISH ROUND':'NEXT'}</button>`;
+  upd();
+}
+function endRound(){
+  const pass=right>=7,o=$('ov');o.hidden=false;o.style.display='flex';
+  o.innerHTML=`<h1 class="${pass?'ok':'bad'}">${pass?'ROUND CLEAR!':'GAME OVER'}</h1><p>Round ${round}: ${right}/10 correct<br>Score: ${score}<br>${pass?'Next round: harder plays, '+Math.max(3,9-1.5*(round+1))+'s timer':'You needed 7 to advance.'}</p><button id="go2">${pass?'NEXT ROUND':'PLAY AGAIN'}</button>`;
+  $('go2').onclick=()=>{if(pass)round++;else{round=1;score=0}start()};
+}
+function start(){$('ov').style.display='none';lim=Math.max(3,9-1.5*round);ab=0;right=0;newAB()}
+$('go').onclick=start;
+$('fb').onclick=e=>{if(e.target.id==='nx'){ab>=10?endRound():newAB()}};
+cv.addEventListener('pointerdown',e=>{
+  if(st!=='decide')return;const r=cv.getBoundingClientRect(),x=(e.clientX-r.left)*800/r.width,y=(e.clientY-r.top)*600/r.height;
+  let best=null,bd=60;for(const k in TG)for(const p of TG[k]){const d=Math.hypot(p[0]-x,p[1]-y);if(d<bd){bd=d;best=k}}
+  if(best)resolve(best);
+});
+// drawing
+const px=(x,y,w,h,c)=>{g.fillStyle=c;g.fillRect(Math.round(x),Math.round(y),w,h)};
+function guy(p,c,lbl,hl){const[x,y]=p;if(hl){g.strokeStyle='#ffd400';g.lineWidth=3;g.strokeRect(x-16,y-26,32,44)}
+  px(x-8,y-6,16,14,c);px(x-6,y+8,5,8,'#eee');px(x+1,y+8,5,8,'#eee');px(x-6,y-16,12,10,'#f4c27a');px(x-7,y-19,14,5,c);
+  if(lbl){g.fillStyle='#fff';g.font="8px 'Press Start 2P',monospace";g.textAlign='center';g.fillText(lbl,x,y+30)}}
+function bg(){
+  for(let i=0;i<12;i++)px(0,i*50,800,50,i%2?'#2e8b3a':'#37a044');
+  px(0,0,800,30,'#1a1a50');
+  g.fillStyle='#b5753a';g.beginPath();g.moveTo(400,545);g.lineTo(640,400);g.lineTo(400,240);g.lineTo(160,400);g.closePath();g.fill();
+  g.fillStyle='#3a9a45';g.beginPath();g.moveTo(400,500);g.lineTo(565,400);g.lineTo(400,310);g.lineTo(235,400);g.closePath();g.fill();
+  g.strokeStyle='#fff';g.lineWidth=3;g.beginPath();g.moveTo(400,525);g.lineTo(800,230);g.moveTo(400,525);g.lineTo(0,230);g.stroke();
+  px(380,398,40,14,'#b5753a');
+  for(const k of['1','2','3'])px(B[k][0]-9,B[k][1]-9,18,18,'#fff');
+  g.fillStyle='#fff';g.beginPath();g.moveTo(390,515);g.lineTo(410,515);g.lineTo(410,525);g.lineTo(400,532);g.lineTo(390,525);g.fill();
+}
+function lights(x,y,l,n,m,c){g.fillStyle='#fff';g.fillText(l,x,y+8);for(let i=0;i<m;i++){g.fillStyle=i<n?c:'#333';g.beginPath();g.arc(x+30+i*18,y+4,6,0,7);g.fill()}}
+function draw(){
+  bg();g.font="8px 'Press Start 2P',monospace";g.textAlign='left';
+  px(8,8,150,86,'#000c');g.strokeStyle='#ffd400';g.lineWidth=2;g.strokeRect(8,8,150,86);
+  if(cur){lights(18,24,'B',cur.balls,4,'#3ddc5a');lights(18,50,'S',cur.strikes,3,'#ffd400');lights(18,76,'O',cur.outs,2,'#ff4d4d')}
+  const hl=st!=='pitch'&&st!=='call'&&cur?cur.hit:null;
+  for(const k in F)guy(F[k],k==='C'?'#c33':'#e33',k,k===hl);
+  if(cur)for(const k of['1','2','3'])if(cur.r.includes(k)){const p=B[k];guy([p[0]+(k==='3'?-18:k==='1'?18:0),p[1]-(k==='2'?18:0)],'#39f','R'+k)}
+  if(cur&&(st==='call'||(st==='pitch'&&t<.7)))guy([352,512],'#39f','');
+  if(cur&&st!=='pitch'&&st!=='call'){guy([470,468],'#39f','BR');px(0,0,0,0)}
+  else px(366,486,4,34,'#c8a064');
+  if(st==='decide'||st==='throw'||st==='pitch'||st==='result'){g.fillStyle='#fff';g.beginPath();g.arc(bp[0],bp[1]-6,6,0,7);g.fill();g.strokeStyle='#f33';g.lineWidth=1;g.stroke()}
+  if(st==='decide'){const f=tl/lim;px(250,10,300,14,'#000');px(252,12,296*f,10,f>.5?'#3ddc5a':f>.25?'#ffd400':'#ff4d4d');
+    g.textAlign='center';g.font="20px 'Press Start 2P',monospace";g.fillStyle=f>.25?'#fff':'#ff4d4d';g.fillText(tl.toFixed(1),400,60)}
+  callUI();
+}
+function callUI(){
+  if(st!=='call'||!cur)return;
+  const pu=.5+.5*Math.sin(t*9),n=cur.outs;
+  for(const k of['1','2','3'])if(cur.r.includes(k)){g.strokeStyle=`rgba(255,212,0,${.4+.6*pu})`;g.lineWidth=4;g.strokeRect(B[k][0]-20,B[k][1]-20,40,40)}
+  px(170,70,460,98,'#000e');g.strokeStyle='#ffd400';g.lineWidth=3;g.strokeRect(170,70,460,98);
+  g.textAlign='center';g.fillStyle='#ffd400';g.font="9px 'Press Start 2P',monospace";g.fillText('COACH CALLS:',400,92);
+  g.fillStyle='#fff';g.font="20px 'Press Start 2P',monospace";g.fillText(rl(cur.r),400,124);
+  g.fillStyle=n==2?'#ff4d4d':'#fff';g.fillText((n==0?'NO':n)+' OUT'+(n==1?'':'S'),400,154);
+  g.font="9px 'Press Start 2P',monospace";g.fillStyle='#ffd400';
+  if(round<=2){
+    const lab={1:[590,372],2:[400,262],3:[210,372],H:[470,548]};
+    for(const k in lab){const f=cur.forced.includes(k),rn=k==='H'&&cur.r.includes('3');
+      if(f||rn){g.fillStyle=f?'#ffd400':'#4df';g.fillText(f?'FORCE':'TAG',lab[k][0],lab[k][1])}}
+  }else g.fillText('WHERE ARE THE FORCES?',400,190);
+}
+let last=performance.now();
+function tick(n){
+  const dt=Math.min(.05,(n-last)/1000);last=n;t+=dt;
+  if(st==='call'){if(t>=Math.max(1.4,2.4-.3*round)){st='pitch';t=0}}
+  else if(st==='pitch'){const hp=F[cur.hit];
+    if(t<.5)bp=[400,405+(515-405)*t/.5];
+    else if(t<1.3){const u=(t-.5)/.8;bp=[400+(hp[0]-400)*u,515+(hp[1]-515)*u]}
+    else{bp=hp.slice();st='decide';tl=lim;
+      $('sit').innerHTML=`${rl(cur.r)} &bull; ${cur.outs} OUT &bull; ${cur.hit}<br>${cur.desc}`}}
+  else if(st==='decide'){tl-=dt;if(tl<=0){tl=0;resolve(null)}}
+  else if(st==='throw'){
+    const k=cur.pick;if(!k){st='result';$('fb').hidden=false}
+    else{const tp=TG[k][0],u=Math.min(1,t/.4);bp=[cur.from[0]+(tp[0]-cur.from[0])*u,cur.from[1]+(tp[1]-cur.from[1])*u];if(u>=1){st='result';$('fb').hidden=false}}}
+  if(st!=='idle'||true)draw();requestAnimationFrame(tick)}
+requestAnimationFrame(tick);
+</script></body></html>
